@@ -70,11 +70,16 @@
 **************************************************************************/
 
 #include "plugin_main_apis.h"
+#include "mta_custom.h"
 #include "cosa_x_cisco_com_mta_apis.h"
 #include "cosa_x_cisco_com_mta_dml.h"
 #include "cosa_x_cisco_com_mta_internal.h"
 #include "mta_hal.h"
 #include <sysevent/sysevent.h>
+
+static int sysevent_fd;
+static token_t sysevent_token;
+
 /**********************************************************************
 
     caller:     owner of the object
@@ -134,8 +139,14 @@ ANSC_STATUS ConverStr2Hex(unsigned char buffer[])
 {
 	int i = 0, j =0; int len = 0;
 	char 	tbuffer [ 64 ] = { 0 };
+        errno_t rc = -1;
 			len = strlen(buffer);
-			strcpy(tbuffer,buffer);
+                        rc = strcpy_s(tbuffer,sizeof(tbuffer), buffer);
+                        if(rc != EOK)
+                        {
+                            ERR_CHK(rc);
+                            return ANSC_STATUS_FAILURE;
+                        }
 			printf("len = %d\n",len);
 			for(i = 0; i<len; i++)
 			{
@@ -163,6 +174,424 @@ ANSC_STATUS ConverStr2Hex(unsigned char buffer[])
 }
 
 ANSC_STATUS
+CosaMTAInitializeEthWanProvDhcpOption
+    (
+        ANSC_HANDLE                 hThisObject
+    )
+{
+
+	 MTA_IP_TYPE_TR ip_type;
+	 char 	buffer [ 128 ] = { 0 };
+	 int	MtaIPMode = 0,IP_Pref_Mode_Received=0;
+	 int i = 0, j =0; int len = 0;
+         errno_t rc = -1;
+	 PMTAMGMT_MTA_PROVISIONING_PARAMS pMtaProv = NULL;
+	 pMtaProv = (PMTAMGMT_MTA_PROVISIONING_PARAMS)malloc(sizeof(MTAMGMT_PROVISIONING_PARAMS));
+
+	 PCOSA_DATAMODEL_MTA      pMyObject    = (PCOSA_DATAMODEL_MTA)hThisObject;
+	 pMyObject->pmtaprovinfo = (PCOSA_MTA_ETHWAN_PROV_INFO)AnscAllocateMemory(sizeof(COSA_MTA_ETHWAN_PROV_INFO));
+	 rc = memset_s(pMyObject->pmtaprovinfo, sizeof(COSA_MTA_ETHWAN_PROV_INFO), 0, sizeof(COSA_MTA_ETHWAN_PROV_INFO));
+         ER_CHK(rc);
+
+	 char Ip_Pref [ 6 ] = { 0 }, Ipv4_Primary[16] = {0}, Ipv4_Secondary[16] = {0}, Ipv6_Primary[64] = {0} , Ipv6_Secondary[64] = {0};
+	 rc = memset_s(Ip_Pref, sizeof(Ip_Pref), 0, sizeof(Ip_Pref));
+         ERR_CHK(rc);
+	 rc = memset_s(Ipv4_Primary, sizeof( Ipv4_Primary), 0, sizeof( Ipv4_Primary));
+         ERR_CHK(rc);
+	 rc = memset_s(Ipv4_Secondary, sizeof(Ipv4_Secondary), 0, sizeof(Ipv4_Secondary));
+         ERR_CHK(rc);
+	 rc = memset_s(Ipv6_Primary,sizeof(Ipv6_Primary), 0, sizeof(Ipv6_Primary));
+         ERR_CHK(rc);
+	 rc = memset_s(Ipv6_Secondary, sizeof(Ipv6_Secondary), 0, sizeof(Ipv6_Secondary));
+         ERR_CHK(rc);
+	 CosaMTAInitializeEthWanProvJournal(pMyObject->pmtaprovinfo);
+
+	sysevent_get(sysevent_fd, sysevent_token, "MTA_IP_PREF", Ip_Pref, sizeof(Ip_Pref));
+	sysevent_get(sysevent_fd, sysevent_token, "MTA_DHCPv4_PrimaryAddress", Ipv4_Primary, sizeof(Ipv4_Primary));
+	sysevent_get(sysevent_fd, sysevent_token, "MTA_DHCPv4_SecondaryAddress", Ipv4_Secondary, sizeof(Ipv4_Secondary));
+	sysevent_get(sysevent_fd, sysevent_token, "MTA_DHCPv6_PrimaryAddress", Ipv6_Primary, sizeof(Ipv6_Primary));
+	sysevent_get(sysevent_fd, sysevent_token, "MTA_DHCPv6_SecondaryAddress", Ipv6_Secondary, sizeof(Ipv6_Secondary));
+
+    CcspTraceInfo(("%s MTA values returned from dhcp server are \n",__FUNCTION__));
+
+    CcspTraceInfo(("%s MTA_IP_PREF = %s \n",__FUNCTION__,Ip_Pref));
+    CcspTraceInfo(("%s MTA_DHCPv4_PrimaryAddress = %s,MTA_DHCPv4_SecondaryAddress = %s  \n",__FUNCTION__,Ipv4_Primary,Ipv4_Secondary));
+    CcspTraceInfo(("%s MTA_DHCPv6_PrimaryAddress = %s,MTA_DHCPv6_SecondaryAddress = %s  \n",__FUNCTION__,Ipv6_Primary,Ipv6_Secondary));
+
+	if ( ( 0 == strncmp(Ipv4_Primary,"00000000",8) ) || ( 0 == strncmp(Ipv6_Primary,"00000000",8) ) )
+	{
+	    CcspTraceWarning(("%s Received 0's from dhcp sever ,not initializing MTA \n",__FUNCTION__));
+		return ANSC_STATUS_FAILURE;
+	} 
+
+	if(pMtaProv)
+	{
+
+		rc = memset_s(buffer, sizeof(buffer), 0,sizeof(buffer));
+                ERR_CHK(rc);
+
+		if(Ip_Pref[0] != '\0') {
+			sscanf( Ip_Pref, "%d", &IP_Pref_Mode_Received );
+			if ( IP_Pref_Mode_Received == 01 )
+				MtaIPMode = MTA_IPV4;
+			else if ( IP_Pref_Mode_Received == 02 )
+				MtaIPMode = MTA_IPV6;
+			else if ( ( IP_Pref_Mode_Received == 05 ) || ( IP_Pref_Mode_Received == 06 ) )
+				MtaIPMode = MTA_DUAL_STACK;
+			else
+			{
+				CcspTraceWarning(("%s Value received from server is invalid , using default value \n",__FUNCTION__));
+
+				if( 0 == syscfg_get( NULL, "StartupIPMode", buffer, sizeof(buffer)))
+				{
+				   if(buffer[0] != '\0')
+				   {
+						sscanf( buffer, "%d", &MtaIPMode );
+	     				CcspTraceInfo(("%s Default MtaIPMode is %d \n",__FUNCTION__,MtaIPMode));
+				   }
+				}
+			}
+
+			CcspTraceInfo(("MtaIPMode = %d\n",MtaIPMode));
+		}
+		else
+		{
+			// deduce MtaIPMode value from dhcp server  if one of the ip is received , if both are received use default, if not received then use default
+			if ( ( (Ipv4_Primary[0] != '\0')  && (Ipv6_Primary[0] != '\0') ) || ( (Ipv4_Primary[0] == '\0')  && (Ipv6_Primary[0] == '\0') ) )
+			{
+
+				if( 0 == syscfg_get( NULL, "StartupIPMode", buffer, sizeof(buffer)))
+				{
+				   if(buffer[0] != '\0')
+				   {
+						sscanf( buffer, "%d", &MtaIPMode );
+	     				CcspTraceInfo(("%s Default MtaIPMode is %d \n",__FUNCTION__,MtaIPMode));
+				   }
+				}
+		       }
+
+			else if ( Ipv4_Primary[0] != '\0')
+			{
+	     		CcspTraceInfo(("%s Received only Ipv4_Primary from dhcp server , setting IP Preference mode to ipv4 \n",__FUNCTION__));
+				MtaIPMode=MTA_IPV4;
+
+			}
+			else if ( Ipv6_Primary[0] != '\0')
+			{
+	     		CcspTraceInfo(("%s Received only Ipv6_Primary from dhcp server , setting IP Preference mode to ipv6  \n",__FUNCTION__));
+				MtaIPMode=MTA_IPV6;
+			}
+
+		}
+
+		pMtaProv->MtaIPMode = MtaIPMode;
+		CosaDmlMTASetStartUpIpMode(pMyObject->pmtaprovinfo,MtaIPMode);
+		ip_type = MTA_IPV4_TR;
+
+		rc = memset_s(pMtaProv->DhcpOption122Suboption1, sizeof(pMtaProv->DhcpOption122Suboption1), 0, MTA_DHCPOPTION122SUBOPTION1_MAX);
+                ERR_CHK(rc);
+		if (Ipv4_Primary[0] != '\0' )
+			{
+                                rc = strcpy_s(buffer, sizeof(buffer), Ipv4_Primary);
+                                if(rc != EOK)
+                                {
+                                    ERR_CHK(rc);
+                                    return ANSC_STATUS_FAILURE;
+                                }
+			}
+			else 
+			{
+				syscfg_get( NULL, "IPv4PrimaryDhcpServerOptions", buffer, sizeof(buffer));
+			}	
+				
+				   if(buffer[0] != '\0')
+				   {
+					len = strlen(buffer);
+					CosaDmlMTASetPrimaryDhcpServerOptions(pMyObject->pmtaprovinfo, buffer, ip_type);
+					if((MtaIPMode ==  MTA_IPV4) || (MtaIPMode == MTA_DUAL_STACK))
+					{
+						if(ConverStr2Hex(buffer) == ANSC_STATUS_SUCCESS)
+						{
+							for(i = 0,j= 0;i<len; i++,j++)
+							{
+								if(j<MTA_DHCPOPTION122SUBOPTION1_MAX)
+								{
+									pMtaProv->DhcpOption122Suboption1[j] |= (unsigned char)(((buffer[i])<<4) + (buffer[++i]));
+								}
+								else
+									break;
+							}
+	
+							printf("pMtaProv->DhcpOption122Suboption1[0] = %X %d\n",pMtaProv->DhcpOption122Suboption1[0],pMtaProv->DhcpOption122Suboption1[0]);
+							printf("pMtaProv->DhcpOption122Suboption1[1] = %X %d\n",pMtaProv->DhcpOption122Suboption1[1],pMtaProv->DhcpOption122Suboption1[1]);
+							printf("pMtaProv->DhcpOption122Suboption1[2] = %X %d\n",pMtaProv->DhcpOption122Suboption1[2],pMtaProv->DhcpOption122Suboption1[2]);
+							printf("pMtaProv->DhcpOption122Suboption1[3] = %X %d\n",pMtaProv->DhcpOption122Suboption1[3],pMtaProv->DhcpOption122Suboption1[3]);
+						}
+					}
+				   }
+
+
+			rc = memset_s(pMtaProv->DhcpOption122Suboption2, sizeof(pMtaProv->DhcpOption122Suboption2), 0, MTA_DHCPOPTION122SUBOPTION2_MAX);
+                        ERR_CHK(rc);
+			if (Ipv4_Secondary[0] != '\0' )
+			{
+                               rc = strcpy_s(buffer, sizeof(buffer), Ipv4_Secondary);
+                               if(rc != EOK)
+                               {
+                                   ERR_CHK(rc);
+                                   return ANSC_STATUS_FAILURE;
+                               }
+			}
+			else
+			{
+				syscfg_get( NULL, "IPv4SecondaryDhcpServerOptions", buffer, sizeof(buffer));
+			}
+				   
+				   if(buffer[0] != '\0')
+				   {
+					len = strlen(buffer);
+					CosaDmlMTASetSecondaryDhcpServerOptions(pMyObject->pmtaprovinfo, buffer, ip_type);
+					if((MtaIPMode ==  MTA_IPV4) || (MtaIPMode == MTA_DUAL_STACK))
+					{
+						if(ConverStr2Hex(buffer) == ANSC_STATUS_SUCCESS)
+						{
+					   		for(i = 0,j= 0;i<len; i++,j++)
+							{
+								if(j<MTA_DHCPOPTION122SUBOPTION2_MAX)
+								{
+									pMtaProv->DhcpOption122Suboption2[j] |= (unsigned char)(((buffer[i])<<4) + (buffer[++i]));
+								}
+								else
+									break;
+							}
+							printf("pMtaProv->DhcpOption122Suboption2[0] = %X %d\n",pMtaProv->DhcpOption122Suboption2[0],pMtaProv->DhcpOption122Suboption2[0]);
+							printf("pMtaProv->DhcpOption122Suboption2[1] = %X %d\n",pMtaProv->DhcpOption122Suboption2[1],pMtaProv->DhcpOption122Suboption2[1]);
+							printf("pMtaProv->DhcpOption122Suboption2[2] = %X %d\n",pMtaProv->DhcpOption122Suboption2[2],pMtaProv->DhcpOption122Suboption2[2]);
+							printf("pMtaProv->DhcpOption122Suboption2[3] = %X %d\n",pMtaProv->DhcpOption122Suboption2[3],pMtaProv->DhcpOption122Suboption2[3]);
+						}
+					}
+
+				   }
+	    ip_type = MTA_IPV6_TR;
+
+				rc = memset_s(pMtaProv->DhcpOption2171CccV6DssID1, sizeof(pMtaProv->DhcpOption2171CccV6DssID1), 0, MTA_DHCPOPTION122CCCV6DSSID1_MAX);
+                                ERR_CHK(rc);
+			if ( Ipv6_Primary[0] != '\0' ) 
+			{
+                                rc = strcpy_s(buffer, sizeof(buffer), Ipv6_Primary);
+                                if(rc != EOK)
+                                {
+                                    ERR_CHK(rc);
+                                    return ANSC_STATUS_FAILURE;
+                                }
+			}
+
+			else
+			{
+				syscfg_get( NULL, "IPv6PrimaryDhcpServerOptions", buffer, sizeof(buffer));
+			}
+				
+				   if(buffer[0] != '\0')
+				   {
+					len = strlen(buffer);
+					CosaDmlMTASetPrimaryDhcpServerOptions(pMyObject->pmtaprovinfo, buffer, ip_type);
+					if((MtaIPMode == MTA_IPV6) || (MtaIPMode == MTA_DUAL_STACK))
+					{	
+						if(ConverStr2Hex(buffer) == ANSC_STATUS_SUCCESS)
+						{
+							printf("Buffer is %s\n",buffer);
+								for(i = 0,j= 0;i<len; i++,j++)
+										{
+								if(j<MTA_DHCPOPTION122CCCV6DSSID1_MAX)
+								{
+									pMtaProv->DhcpOption2171CccV6DssID1[j] |= (unsigned char)(((buffer[i])<<4) + (buffer[++i]));
+								}
+								else
+									break;
+							}
+	
+							printf("pMtaProv->DhcpOption2171CccV6DssID1[0] = %X %d\n",pMtaProv->DhcpOption2171CccV6DssID1[0],pMtaProv->DhcpOption2171CccV6DssID1[0]);
+							printf("pMtaProv->DhcpOption2171CccV6DssID1[1] = %X %d\n",pMtaProv->DhcpOption2171CccV6DssID1[1],pMtaProv->DhcpOption2171CccV6DssID1[1]);
+							printf("pMtaProv->DhcpOption2171CccV6DssID1[2] = %X %d\n",pMtaProv->DhcpOption2171CccV6DssID1[2],pMtaProv->DhcpOption2171CccV6DssID1[2]);
+							printf("pMtaProv->DhcpOption2171CccV6DssID1[3] = %X %d\n",pMtaProv->DhcpOption2171CccV6DssID1[3],pMtaProv->DhcpOption2171CccV6DssID1[3]);
+							pMtaProv->DhcpOption2171CccV6DssID1Len = j;
+							printf("pMtaProv->DhcpOption2171CccV6DssID1Len = %d\n",pMtaProv->DhcpOption2171CccV6DssID1Len);
+						}
+					}
+
+				   }
+
+				rc = memset_s(pMtaProv->DhcpOption2171CccV6DssID2, sizeof(pMtaProv->DhcpOption2171CccV6DssID2), 0, MTA_DHCPOPTION122CCCV6DSSID2_MAX);
+                                ERR_CHK(rc);
+			if ( Ipv6_Secondary[0] != '\0' )   
+			{
+                                rc = strcpy_s(buffer, sizeof(buffer), Ipv6_Secondary);
+                                if(rc != EOK)
+                                {
+                                    ERR_CHK(rc);
+                                    return ANSC_STATUS_FAILURE;
+                                }
+			}
+			else
+			{
+				syscfg_get( NULL, "IPv6SecondaryDhcpServerOptions", buffer, sizeof(buffer));
+			}   
+				   if(buffer[0] != '\0')
+				   {
+					len = strlen(buffer);
+					CosaDmlMTASetSecondaryDhcpServerOptions(pMyObject->pmtaprovinfo, buffer, ip_type);
+					if((MtaIPMode == MTA_IPV6) || (MtaIPMode == MTA_DUAL_STACK))
+				      {	
+						if(ConverStr2Hex(buffer) == ANSC_STATUS_SUCCESS)
+						{
+							printf("Buffer is %s\n",buffer);
+					   		for(i = 0,j= 0;i<len; i++,j++)
+							{
+								if(j<MTA_DHCPOPTION122CCCV6DSSID2_MAX)
+								{
+									pMtaProv->DhcpOption2171CccV6DssID2[j] |= (unsigned char)(((buffer[i])<<4) + (buffer[++i]));
+								}
+								else
+									break;
+							}
+							printf("pMtaProv->DhcpOption2171CccV6DssID2[0] = %X %d\n",pMtaProv->DhcpOption2171CccV6DssID2[0],pMtaProv->DhcpOption2171CccV6DssID2[0]);
+							printf("pMtaProv->DhcpOption2171CccV6DssID2[1] = %X %d\n",pMtaProv->DhcpOption2171CccV6DssID2[1],pMtaProv->DhcpOption2171CccV6DssID2[1]);
+							printf("pMtaProv->DhcpOption2171CccV6DssID2[2] = %X %d\n",pMtaProv->DhcpOption2171CccV6DssID2[2],pMtaProv->DhcpOption2171CccV6DssID2[2]);
+							printf("pMtaProv->DhcpOption2171CccV6DssID2[3] = %X %d\n",pMtaProv->DhcpOption2171CccV6DssID2[3],pMtaProv->DhcpOption2171CccV6DssID2[3]);
+							pMtaProv->DhcpOption2171CccV6DssID2Len = j;
+							printf("pMtaProv->DhcpOption2171CccV6DssID2Len = %d\n",pMtaProv->DhcpOption2171CccV6DssID2Len);
+						}
+					}
+
+				   }
+    #if defined (_COSA_BCM_ARM_) 
+		// call hal to start provisioning
+		if(mta_hal_start_provisioning(pMtaProv) == RETURN_OK)
+		{
+			CcspTraceError(("mta_hal_start_provisioning succeded '%s'\n", __FUNCTION__));
+			return ANSC_STATUS_SUCCESS;
+		}
+		else
+		{
+			CcspTraceError(("mta_hal_start_provisioning Failed '%s'\n", __FUNCTION__));
+			return ANSC_STATUS_FAILURE;
+		}
+                free(pMtaProv);
+     #endif
+}
+else
+	{
+		printf("Memory Alloction Failed '%s'\n", __FUNCTION__);
+		CcspTraceError(("Memory Alloction Failed '%s'\n", __FUNCTION__));
+		return ANSC_STATUS_FAILURE;
+	}  
+}
+
+void WaitForDhcpOption()
+{
+ unsigned char dhcp_option[10] = {0};
+ int count=0;
+ errno_t rc = -1;
+ int ind = -1;
+
+//  wait for 1 min to receive MTA options/Offer , otherwise time out 
+ while ( 12 >= count )
+ {
+	rc = memset_s(dhcp_option, sizeof(dhcp_option), 0, sizeof(dhcp_option));
+        ERR_CHK(rc);
+	sysevent_get(sysevent_fd, sysevent_token, "dhcp_mta_option", dhcp_option, sizeof(dhcp_option));
+        rc  = strcmp_s(dhcp_option, sizeof(dhcp_option), "received", &ind);
+	if ((ind == 0) && (rc == EOK))
+	{
+		CcspTraceWarning(("%s dhcp_option's received,breaking the loop  \n",__FUNCTION__));
+		break;
+
+	}
+	sleep(5);
+	count++;
+ }
+ 
+}
+
+ANSC_STATUS Mta_Sysevent_thread_Dhcp_Option(ANSC_HANDLE  hThisObject)
+
+{
+
+ PCOSA_DATAMODEL_MTA      pMyObject    = (PCOSA_DATAMODEL_MTA)hThisObject;
+
+ unsigned char current_wan_state[10] = {0}, dhcp_option[10] = {0};
+
+ int err;
+ unsigned char name[25]={0}, val[10]={0};
+ errno_t rc = -1;
+ int ind = -1;
+ async_id_t getnotification_asyncid;
+ rc = memset_s(current_wan_state, sizeof(current_wan_state), 0, sizeof(current_wan_state));
+ ERR_CHK(rc);
+ rc = memset_s(dhcp_option, sizeof(dhcp_option), 0, sizeof(dhcp_option));
+ ER_CHK(rc);
+ async_id_t wan_state_asyncid;
+
+ int retValue=0,  namelen=0, vallen =0 ;
+ sysevent_set_options(sysevent_fd, sysevent_token, "current_wan_state", TUPLE_FLAG_EVENT);
+ retValue=sysevent_setnotification(sysevent_fd, sysevent_token, "current_wan_state",  &wan_state_asyncid);
+ CcspTraceWarning(("%s Return value is   %d\n",__FUNCTION__,retValue));
+
+ sysevent_get(sysevent_fd, sysevent_token, "current_wan_state", current_wan_state, sizeof(current_wan_state));
+ sysevent_get(sysevent_fd, sysevent_token, "dhcp_mta_option", dhcp_option, sizeof(dhcp_option));
+
+ rc = strcmp_s(current_wan_state, sizeof(current_wan_state), "up", &ind);
+ ERR_CHK(rc);
+ if((rc == EOK) && (ind == 0))
+ {
+     rc = strcmp_s(dhcp_option, sizeof(dhcp_option), "received", &ind);
+     ERR_CHK(rc);
+     if((rc == EOK) && (ind == 0))
+     {
+           CcspTraceWarning(("%s current_wan_state up, Initializing MTA \n",__FUNCTION__));
+           CosaMTAInitializeEthWanProvDhcpOption(pMyObject);
+     }
+     else if((rc == EOK) && (ind != 0))
+     {
+           CcspTraceWarning(("%s current_wan_state up, but dhcp_option's not received.  \n",__FUNCTION__));
+           WaitForDhcpOption();
+           CosaMTAInitializeEthWanProvDhcpOption(pMyObject);
+      }
+ }
+
+  while (1)
+  {
+
+    namelen = sizeof(name);
+    vallen  = sizeof(val);
+
+    rc = memset_s(name, sizeof(name), 0, sizeof(name));
+    ERR_CHK(rc);
+    rc = memset_s(val, sizeof(val), 0, sizeof(val));
+    ERR_CHK(rc);
+
+    err = sysevent_getnotification(sysevent_fd, sysevent_token, name, &namelen, val, &vallen, &getnotification_asyncid);
+
+    if (!err)
+    {
+        CcspTraceWarning(("%s Recieved notification event  %s, state %s\n",__FUNCTION__,name,val));
+        rc = strcmp_s(name, sizeof(name), "current_wan_state", &ind);
+        ERR_CHK(rc);
+        if((rc == EOK) && (ind == 0))
+        {
+             rc = strcmp_s(val, sizeof(val), "up", &ind);
+             ERR_CHK(rc);
+             if((rc == EOK) && (ind == 0))
+             {
+                   WaitForDhcpOption();
+                   CosaMTAInitializeEthWanProvDhcpOption(pMyObject);
+             }
+        }
+    }
+  }
+}
+
+ANSC_STATUS
 CosaMTAInitializeEthWanProv
     (
         ANSC_HANDLE                 hThisObject
@@ -173,19 +602,22 @@ CosaMTAInitializeEthWanProv
  char 	buffer [ 128 ] = { 0 };
  int	MtaIPMode = 0;
  int i = 0, j =0; int len = 0;
+ errno_t rc = -1;
  PMTAMGMT_MTA_PROVISIONING_PARAMS pMtaProv = NULL;
  pMtaProv = (PMTAMGMT_MTA_PROVISIONING_PARAMS)malloc(sizeof(MTAMGMT_PROVISIONING_PARAMS));
 
  PCOSA_DATAMODEL_MTA      pMyObject    = (PCOSA_DATAMODEL_MTA)hThisObject;
  pMyObject->pmtaprovinfo = (PCOSA_MTA_ETHWAN_PROV_INFO)AnscAllocateMemory(sizeof(COSA_MTA_ETHWAN_PROV_INFO));
- memset (pMyObject->pmtaprovinfo, 0, sizeof(COSA_MTA_ETHWAN_PROV_INFO));
+ rc = memset_s(pMyObject->pmtaprovinfo,sizeof(COSA_MTA_ETHWAN_PROV_INFO), 0, sizeof(COSA_MTA_ETHWAN_PROV_INFO));
+ ERR_CHK(rc);
 
  CosaMTAInitializeEthWanProvJournal(pMyObject->pmtaprovinfo);
 
 if(pMtaProv)
 {
 
-	memset(buffer,0,sizeof(buffer));
+	rc =  memset_s(buffer, sizeof(buffer), 0, sizeof(buffer));
+        ERR_CHK(rc);
 	if( 0 == syscfg_get( NULL, "StartupIPMode", buffer, sizeof(buffer)))
 	{
 	   if(buffer[0] != '\0')
@@ -197,8 +629,10 @@ if(pMtaProv)
 	}
         CosaDmlMTASetStartUpIpMode(pMyObject->pmtaprovinfo,MtaIPMode);
         ip_type = MTA_IPV4_TR;
-		memset(buffer,0,sizeof(buffer));
-		memset(pMtaProv->DhcpOption122Suboption1,0,MTA_DHCPOPTION122SUBOPTION1_MAX);
+		rc = memset_s(buffer, sizeof(buffer), 0, sizeof(buffer));
+                ERR_CHK(rc);
+		rc = memset_s(pMtaProv->DhcpOption122Suboption1, sizeof(pMtaProv->DhcpOption122Suboption1), 0, MTA_DHCPOPTION122SUBOPTION1_MAX);
+                ERR_CHK(rc);
 		if( 0 == syscfg_get( NULL, "IPv4PrimaryDhcpServerOptions", buffer, sizeof(buffer)))
 		{
 		   if(buffer[0] != '\0')
@@ -229,8 +663,10 @@ if(pMtaProv)
 
 		   }
 		}
-		memset(buffer,0,sizeof(buffer));
-		memset(pMtaProv->DhcpOption122Suboption2,0,MTA_DHCPOPTION122SUBOPTION2_MAX);
+		rc = memset_s(buffer,sizeof(buffer), 0, sizeof(buffer));
+                ERR_CHK(rc);
+		rc = memset_s(pMtaProv->DhcpOption122Suboption2, sizeof(pMtaProv->DhcpOption122Suboption2), 0, MTA_DHCPOPTION122SUBOPTION2_MAX);
+                ERR_CHK(rc);
 		if( 0 == syscfg_get( NULL, "IPv4SecondaryDhcpServerOptions", buffer, sizeof(buffer)))
 		{
 		   
@@ -262,8 +698,10 @@ if(pMtaProv)
 		}
   
         ip_type = MTA_IPV6_TR;
-		memset(buffer,0,sizeof(buffer));
-		memset(pMtaProv->DhcpOption2171CccV6DssID1,0,MTA_DHCPOPTION122CCCV6DSSID1_MAX);
+		rc = memset_s(buffer, sizeof(buffer), 0, sizeof(buffer));
+                ERR_CHK(rc);
+		rc = memset_s(pMtaProv->DhcpOption2171CccV6DssID1, sizeof(pMtaProv->DhcpOption2171CccV6DssID1), 0, MTA_DHCPOPTION122CCCV6DSSID1_MAX);
+                ERR_CHK(rc);
 		if( 0 == syscfg_get( NULL, "IPv6PrimaryDhcpServerOptions", buffer, sizeof(buffer)))
 		{
 		   if(buffer[0] != '\0')
@@ -296,8 +734,10 @@ if(pMtaProv)
 			}
 		   }
 		}
-		memset(buffer,0,sizeof(buffer));
-		memset(pMtaProv->DhcpOption2171CccV6DssID2,0,MTA_DHCPOPTION122CCCV6DSSID2_MAX);
+		rc = memset_s(buffer, sizeof(buffer), 0, sizeof(buffer));
+                ERR_CHK(rc);
+		rc = memset_s(pMtaProv->DhcpOption2171CccV6DssID2, sizeof(pMtaProv->DhcpOption2171CccV6DssID2), 0, MTA_DHCPOPTION122CCCV6DSSID2_MAX);
+                ERR_CHK(rc);
 		pMtaProv->DhcpOption2171CccV6DssID2Len = 0;
 		if( 0 == syscfg_get( NULL, "IPv6SecondaryDhcpServerOptions", buffer, sizeof(buffer)))
 		{
@@ -353,7 +793,6 @@ else
 	}  
 }
 
-
 ANSC_STATUS
 CosaSetMTAHal
     (
@@ -363,6 +802,7 @@ CosaSetMTAHal
  char 	buffer [ 128 ] = { 0 };
  int	MtaIPMode = 0;
  int i = 0, j =0; int len = 0;
+ errno_t rc = -1;
  PMTAMGMT_MTA_PROVISIONING_PARAMS pMtaProv = NULL;
  pMtaProv = (PMTAMGMT_MTA_PROVISIONING_PARAMS)malloc(sizeof(MTAMGMT_PROVISIONING_PARAMS));
 
@@ -372,11 +812,16 @@ if(pMtaProv)
 	MtaIPMode = pmtaethpro->StartupIPMode.ActiveValue;
 	pMtaProv->MtaIPMode = MtaIPMode;
 	printf("pMtaProv->MtaIPMode = %d\n", pMtaProv->MtaIPMode);
-	memset(buffer,0,sizeof(buffer));
-	memset(pMtaProv->DhcpOption122Suboption1,0,MTA_DHCPOPTION122SUBOPTION1_MAX);
+	rc = memset_s(pMtaProv->DhcpOption122Suboption1, sizeof(pMtaProv->DhcpOption122Suboption1), 0, MTA_DHCPOPTION122SUBOPTION1_MAX);
+        ERR_CHK(rc);
 		if( 0 != strlen(pmtaethpro->IPv4PrimaryDhcpServerOptions.ActiveValue))
 		{
-		   _ansc_strcpy(buffer,pmtaethpro->IPv4PrimaryDhcpServerOptions.ActiveValue);
+                   rc = strcpy_s(buffer, sizeof(buffer), pmtaethpro->IPv4PrimaryDhcpServerOptions.ActiveValue);
+                   if(rc != EOK)
+                   {
+                       ERR_CHK(rc);
+                       return ANSC_STATUS_FAILURE;
+                   }
 		   if(buffer[0] != '\0')
 		   {
 			len = strlen(buffer);
@@ -404,11 +849,16 @@ if(pMtaProv)
 
 		   }
 		}
-		memset(buffer,0,sizeof(buffer));
-		memset(pMtaProv->DhcpOption122Suboption2,0,MTA_DHCPOPTION122SUBOPTION2_MAX);
+                rc = memset_s(pMtaProv->DhcpOption122Suboption2, sizeof(pMtaProv->DhcpOption122Suboption2), 0, MTA_DHCPOPTION122SUBOPTION2_MAX);
+                ERR_CHK(rc);
 		if( 0 != strlen(pmtaethpro->IPv4SecondaryDhcpServerOptions.ActiveValue))
 		{
-		   _ansc_strcpy(buffer,pmtaethpro->IPv4SecondaryDhcpServerOptions.ActiveValue);
+                   rc = strcpy_s(buffer, sizeof(buffer), pmtaethpro->IPv4SecondaryDhcpServerOptions.ActiveValue);
+                   if(rc != EOK)
+	           {
+                        ERR_CHK(rc);
+                        return ANSC_STATUS_FAILURE;
+                   }
 		   if(buffer[0] != '\0')
 		   {
 			len = strlen(buffer);
@@ -435,12 +885,17 @@ if(pMtaProv)
 		   }
 		}
   
-		memset(buffer,0,sizeof(buffer));
-		memset(pMtaProv->DhcpOption2171CccV6DssID1,0,MTA_DHCPOPTION122CCCV6DSSID1_MAX);
+		rc = memset_s(pMtaProv->DhcpOption2171CccV6DssID1, sizeof(pMtaProv->DhcpOption2171CccV6DssID1), 0, MTA_DHCPOPTION122CCCV6DSSID1_MAX);
+                ERR_CHK(rc);
 		pMtaProv->DhcpOption2171CccV6DssID1Len = 0;
 		if(0 != strlen(pmtaethpro->IPv6PrimaryDhcpServerOptions.ActiveValue))
 		{
-		   _ansc_strcpy(buffer,pmtaethpro->IPv6PrimaryDhcpServerOptions.ActiveValue);
+                   rc = strcpy_s(buffer, sizeof(buffer), pmtaethpro->IPv6PrimaryDhcpServerOptions.ActiveValue);
+                   if(rc != EOK)
+                   {
+                        ERR_CHK(rc);
+                        return ANSC_STATUS_FAILURE;
+                   }
 		   if(buffer[0] != '\0')
 		   {
 			len = strlen(buffer);
@@ -469,12 +924,17 @@ if(pMtaProv)
 			}
 		   }
 		}
-		memset(buffer,0,sizeof(buffer));
-		memset(pMtaProv->DhcpOption2171CccV6DssID2,0,MTA_DHCPOPTION122CCCV6DSSID2_MAX);
+		rc = memset_s(pMtaProv->DhcpOption2171CccV6DssID2, sizeof(pMtaProv->DhcpOption2171CccV6DssID2), 0, MTA_DHCPOPTION122CCCV6DSSID2_MAX);
+                ERR_CHK(rc);
 		pMtaProv->DhcpOption2171CccV6DssID2Len = 0;
 		if(0 != strlen(pmtaethpro->IPv6SecondaryDhcpServerOptions.ActiveValue))
 		{
-		   _ansc_strcpy(buffer,pmtaethpro->IPv6SecondaryDhcpServerOptions.ActiveValue);
+                   rc = strcpy_s(buffer, sizeof(buffer), pmtaethpro->IPv6SecondaryDhcpServerOptions.ActiveValue);
+                   if(rc != EOK)
+                   {
+                        ERR_CHK(rc);
+                        return ANSC_STATUS_FAILURE;
+                   }
 		   if(buffer[0] != '\0')
 		   {
 			len = strlen(buffer);
@@ -524,58 +984,70 @@ else
 	}  
 }
 
-
-
 ANSC_STATUS Mta_Sysevent_thread(ANSC_HANDLE  hThisObject)
 
 {
 
  PCOSA_DATAMODEL_MTA      pMyObject    = (PCOSA_DATAMODEL_MTA)hThisObject;
+#if 0
  static int sysevent_fd;
          static token_t sysevent_token;
          sysevent_fd = sysevent_open("127.0.0.1", SE_SERVER_WELL_KNOWN_PORT, SE_VERSION, "WAN State", &sysevent_token);
-
+#endif
          unsigned char current_wan_state[10] = {0};
-
+        async_id_t getnotification_asyncid;
+          int err;
+          unsigned char name[25]={0}, val[10]={0};
+          int namelen=0, vallen=0;
+          errno_t rc = -1;
+          int ind = -1;
          async_id_t wan_state_asyncid;
          sysevent_set_options(sysevent_fd, sysevent_token, "current_wan_state", TUPLE_FLAG_EVENT);
          sysevent_setnotification(sysevent_fd, sysevent_token, "current_wan_state",  &wan_state_asyncid);
 
          sysevent_get(sysevent_fd, sysevent_token, "current_wan_state", current_wan_state, sizeof(current_wan_state));
-         if(strcmp(current_wan_state, "up") == 0)
+         rc = strcmp_s(current_wan_state, sizeof(current_wan_state), "up", &ind);
+         ERR_CHK(rc);
+         if((rc == EOK) && (ind == 0))
          {
-                CcspTraceWarning(("%s current_wan_state up, Initializing MTA \n",__FUNCTION__));
+              CcspTraceWarning(("%s current_wan_state up, Initializing MTA \n",__FUNCTION__));
 
-      		CosaMTAInitializeEthWanProv(pMyObject);
-
+              CosaMTAInitializeEthWanProv(pMyObject);
          }
 
         while (1)
         {
-                async_id_t getnotification_asyncid;
-                int err;
-                unsigned char name[25]={0}, val[10]={0};
 
-                int namelen = sizeof(name);
-                int vallen  = sizeof(val);
+          	namelen = sizeof(name);
+          	vallen  = sizeof(val);
+			rc = memset_s(name, sizeof(name), 0, sizeof(name));
+                        ERR_CHK(rc);
+			rc = memset_s(val, sizeof(val), 0, sizeof(val));
+                        ERR_CHK(rc);
                 err = sysevent_getnotification(sysevent_fd, sysevent_token, name, &namelen, val, &vallen, &getnotification_asyncid);
 
                 if (!err)
                 {
                         CcspTraceWarning(("%s Recieved notification event  %s, state %s\n",__FUNCTION__,name,val));
-                        if(( strcmp(name,"current_wan_state") == 0 ) && ( strcmp(val, "up") == 0 ) )
+                        rc = strcmp_s(name, sizeof(name), "current_wan_state", &ind);
+                        ERR_CHK(rc);
+                        if((rc == EOK) && ( ind == 0))
                         {
-
-                            CcspTraceWarning(("%s Initializing/Reinitializing MTA\n",__FUNCTION__));
-                            CosaMTAInitializeEthWanProv(pMyObject);
+                            rc = strcmp_s(val, sizeof(val), "up", &ind);
+                            ERR_CHK(rc);
+                            if((rc == EOK) && (ind == 0))
+                            {
+                                  CcspTraceWarning(("%s Initializing/Reinitializing MTA\n",__FUNCTION__));
+                                  CosaMTAInitializeEthWanProv(pMyObject);
+                            }
                         }
-
                 }
         }
 
 
 
 }
+
 
 /**********************************************************************
 
@@ -614,24 +1086,30 @@ CosaMTAInitialize
 
     /* Initialize middle layer for Device.DeviceInfo.  */
     CosaDmlMTAInit(NULL, (PANSC_HANDLE)pMyObject);
+
     if (syscfg_init() != 0)
     {
         CcspTraceError(("syscfg init Failed '%s'\n", __FUNCTION__));
     }
 
-   #ifdef _COSA_BCM_ARM_
+#ifdef _COSA_BCM_ARM_ 
 
    if( (0 == syscfg_get( NULL, "eth_wan_enabled", isEthEnabled, sizeof(isEthEnabled))) && ((isEthEnabled[0] != '\0') && (strncmp(isEthEnabled, "true", strlen("true")) == 0)))
         {
-    pthread_t MtaInit;
-    pthread_create(&MtaInit, NULL, &Mta_Sysevent_thread, (ANSC_HANDLE) hThisObject);
+        	sysevent_fd = sysevent_open("127.0.0.1", SE_SERVER_WELL_KNOWN_PORT, SE_VERSION, "WAN State", &sysevent_token);
+    		pthread_t MtaInit;
+	 	#if defined (EROUTER_DHCP_OPTION_MTA)
+			pthread_create(&MtaInit, NULL, &Mta_Sysevent_thread_Dhcp_Option, (ANSC_HANDLE) hThisObject);
+		#else
+		 	pthread_create(&MtaInit, NULL, &Mta_Sysevent_thread, (ANSC_HANDLE) hThisObject);
+		#endif
 	}
    else { 
              printf("\nEthernet Wan mode is disabled\n");  
          }
   //  CosaMTAInitializeEthWanProv(hThisObject);
 
-    #endif
+#endif
     return returnStatus;
 }
 
